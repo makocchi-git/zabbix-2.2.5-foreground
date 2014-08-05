@@ -1,0 +1,17 @@
+[Unit]
+Description=Zabbix Java Gateway
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/sbin/zabbix_java
+Environment="JAVA=java"
+Environment="LISTEN_IP=0.0.0.0"
+Environment="LISTEN_PORT=10052"
+EnvironmentFile=-/etc/zabbix/zabbix_java_gateway.conf
+ExecStart=${JAVA} -server -classpath lib:lib/logback-classic-0.9.27.jar:lib/logback-core-0.9.27.jar:lib/org-json-2010-12-28.jar:lib/slf4j-api-1.6.1.jar:bin/zabbix-java-gateway-2.2.4.jar -Dzabbix.pidFile=/var/run/zabbix/zabbix_java.pid -Dzabbix.listenIP=${LISTEN_IP} -Dzabbix.listenPort=${LISTEN_PORT} com.zabbix.gateway.JavaGateway
+User=zabbix
+PIDFile=/var/run/zabbix/zabbix_java.pid
+
+[Install]
+WantedBy=multi-user.target
