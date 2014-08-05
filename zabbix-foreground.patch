@@ -1,0 +1,264 @@
+diff -uNr zabbix-2.2.5-orig/include/common.h zabbix-2.2.5/include/common.h
+--- zabbix-2.2.5-orig/include/common.h	2014-07-17 22:49:45.000000000 +0900
++++ zabbix-2.2.5/include/common.h	2014-08-01 10:50:38.314702137 +0900
+@@ -1067,4 +1067,7 @@
+ #define ZBX_SESSION_ACTIVE	0
+ #define ZBX_SESSION_PASSIVE	1
+ 
++#define ZBX_RUN_BACKGROUND      0
++#define ZBX_RUN_FOREGROUND      1
++
+ #endif
+diff -uNr zabbix-2.2.5-orig/include/daemon.h zabbix-2.2.5/include/daemon.h
+--- zabbix-2.2.5-orig/include/daemon.h	2014-07-17 22:49:45.000000000 +0900
++++ zabbix-2.2.5/include/daemon.h	2014-08-01 10:51:32.739424634 +0900
+@@ -30,7 +30,7 @@
+ 
+ #include "threads.h"
+ 
+-int	daemon_start(int allow_root);
++int	daemon_start(int allow_root, int run_foreground);
+ void	daemon_stop();
+ 
+ int	zbx_sigusr_send(zbx_task_t task);
+@@ -38,6 +38,6 @@
+ #define ZBX_IS_RUNNING()	1
+ #define ZBX_DO_EXIT()
+ 
+-#define START_MAIN_ZABBIX_ENTRY(a)	daemon_start(a)
++#define START_MAIN_ZABBIX_ENTRY(a, f)	daemon_start(a, f)
+ 
+ #endif	/* ZABBIX_DAEMON_H */
+diff -uNr zabbix-2.2.5-orig/include/version.h zabbix-2.2.5/include/version.h
+--- zabbix-2.2.5-orig/include/version.h	2014-07-17 22:50:28.000000000 +0900
++++ zabbix-2.2.5/include/version.h	2014-08-01 12:09:01.525990601 +0900
+@@ -29,7 +29,7 @@
+ #define ZABBIX_VERSION_MINOR	2
+ #define ZABBIX_VERSION_PATCH	5
+ #define ZABBIX_VERSION_REVISION	47411
+-#define ZABBIX_VERSION_RC	""
++#define ZABBIX_VERSION_RC	"fg"
+ #define ZABBIX_VERSION		ZBX_STR(ZABBIX_VERSION_MAJOR) "." ZBX_STR(ZABBIX_VERSION_MINOR) "." \
+ 				ZBX_STR(ZABBIX_VERSION_PATCH) ZABBIX_VERSION_RC
+ #define ZABBIX_REVISION		ZBX_STR(ZABBIX_VERSION_REVISION)
+diff -uNr zabbix-2.2.5-orig/src/libs/zbxnix/daemon.c zabbix-2.2.5/src/libs/zbxnix/daemon.c
+--- zabbix-2.2.5-orig/src/libs/zbxnix/daemon.c	2014-07-17 22:49:45.000000000 +0900
++++ zabbix-2.2.5/src/libs/zbxnix/daemon.c	2014-08-01 10:53:51.484364671 +0900
+@@ -134,13 +134,14 @@
+  * Purpose: init process as daemon                                            *
+  *                                                                            *
+  * Parameters: allow_root - allow root permission for application             *
++ *             run_foreground - should it close its controling tty            *
+  *                                                                            *
+  * Author: Alexei Vladishev                                                   *
+  *                                                                            *
+  * Comments: it doesn't allow running under 'root' if allow_root is zero      *
+  *                                                                            *
+  ******************************************************************************/
+-int	daemon_start(int allow_root)
++int	daemon_start(int allow_root, int run_foreground)
+ {
+ 	pid_t			pid;
+ 	struct passwd		*pwd;
+@@ -186,15 +187,20 @@
+ #endif
+ 	}
+ 
+-	if (0 != (pid = zbx_fork()))
+-		exit(0);
++	if ( ZBX_RUN_FOREGROUND != run_foreground)
++		if (0 != (pid = zbx_fork()))
++			exit(0);
+ 
+ 	setsid();
+ 
+ 	signal(SIGHUP, SIG_IGN);
+ 
+-	if (0 != (pid = zbx_fork()))
+-		exit(0);
++	if ( ZBX_RUN_FOREGROUND == run_foreground) {
++		zabbix_log(LOG_LEVEL_INFORMATION, "Running in foreground...");
++	} else {
++		if (0 != (pid = zbx_fork()))
++			exit(0);
++	}
+ 
+ 	if (-1 == chdir("/"))	/* this is to eliminate warning: ignoring return value of chdir */
+ 		assert(0);
+diff -uNr zabbix-2.2.5-orig/src/zabbix_agent/zabbix_agentd.c zabbix-2.2.5/src/zabbix_agent/zabbix_agentd.c
+--- zabbix-2.2.5-orig/src/zabbix_agent/zabbix_agentd.c	2014-07-17 22:49:45.000000000 +0900
++++ zabbix-2.2.5/src/zabbix_agent/zabbix_agentd.c	2014-08-01 11:03:38.064698387 +0900
+@@ -58,6 +58,8 @@
+ 	static char	DEFAULT_CONFIG_FILE[]	= SYSCONFDIR "/zabbix_agentd.conf";
+ #endif
+ 
++int CONFIG_FOREGROUND = ZBX_RUN_BACKGROUND;
++
+ /* application TITLE */
+ const char	title_message[] = APPLICATION_NAME
+ #if defined(_WIN64)
+@@ -77,7 +79,7 @@
+ 
+ /* application USAGE message */
+ const char	usage_message[] =
+-	"[-Vhp]"
++	"[-Vfhp]"
+ #ifdef _WINDOWS
+ 	" [-idsx] [-m]"
+ #endif
+@@ -89,6 +91,7 @@
+ 	"Options:",
+ 	"",
+ 	"  -c --config <config-file>  Absolute path to the configuration file",
++	"  -f --foreground            Run in foreground don't fork",
+ 	"  -p --print                 Print known items and exit",
+ 	"  -t --test <item key>       Test specified item and exit",
+ 	"  -h --help                  Give this help",
+@@ -113,6 +116,7 @@
+ static struct zbx_option	longopts[] =
+ {
+ 	{"config",		1,	NULL,	'c'},
++	{"foreground",		0,	NULL,	'f'},
+ 	{"help",		0,	NULL,	'h'},
+ 	{"version",		0,	NULL,	'V'},
+ 	{"print",		0,	NULL,	'p'},
+@@ -130,7 +134,7 @@
+ };
+ 
+ static char	shortopts[] =
+-	"c:hVpt:"
++	"c:fhVpt:"
+ #ifdef _WINDOWS
+ 	"idsxm"
+ #endif
+@@ -167,6 +171,9 @@
+ 			case 'c':
+ 				CONFIG_FILE = strdup(zbx_optarg);
+ 				break;
++			case 'f':
++				CONFIG_FOREGROUND = ZBX_RUN_FOREGROUND;
++				break;
+ 			case 'h':
+ 				help();
+ 				exit(EXIT_FAILURE);
+@@ -839,7 +846,7 @@
+ 			break;
+ 	}
+ 
+-	START_MAIN_ZABBIX_ENTRY(CONFIG_ALLOW_ROOT);
++	START_MAIN_ZABBIX_ENTRY(CONFIG_ALLOW_ROOT, CONFIG_FOREGROUND);
+ 
+ 	exit(SUCCEED);
+ }
+diff -uNr zabbix-2.2.5-orig/src/zabbix_proxy/proxy.c zabbix-2.2.5/src/zabbix_proxy/proxy.c
+--- zabbix-2.2.5-orig/src/zabbix_proxy/proxy.c	2014-07-17 22:49:45.000000000 +0900
++++ zabbix-2.2.5/src/zabbix_proxy/proxy.c	2014-08-01 11:06:27.410171857 +0900
+@@ -66,6 +66,7 @@
+ const char	*help_message[] = {
+ 	"Options:",
+ 	"  -c --config <file>              Absolute path to the configuration file",
++	"  -f --foreground                 Run in foreground don't fork",
+ 	"  -R --runtime-control <option>   Perform administrative functions",
+ 	"",
+ 	"Runtime control options:",
+@@ -83,6 +84,7 @@
+ static struct zbx_option	longopts[] =
+ {
+ 	{"config",		1,	NULL,	'c'},
++	{"foreground",		0,	NULL,	'f'},
+ 	{"runtime-control",	1,	NULL,	'R'},
+ 	{"help",		0,	NULL,	'h'},
+ 	{"version",		0,	NULL,	'V'},
+@@ -90,7 +92,7 @@
+ };
+ 
+ /* short options */
+-static char	shortopts[] = "c:n:hVR:";
++static char	shortopts[] = "c:n:fhVR:";
+ 
+ /* end of COMMAND LINE OPTIONS */
+ 
+@@ -195,6 +197,8 @@
+ /* zabbix server startup time */
+ int	CONFIG_SERVER_STARTUP_TIME	= 0;
+ 
++int	CONFIG_FOREGROUND		= ZBX_RUN_BACKGROUND;
++
+ char	*CONFIG_LOAD_MODULE_PATH	= NULL;
+ char	**CONFIG_LOAD_MODULE		= NULL;
+ 
+@@ -538,6 +542,9 @@
+ 			case 'c':
+ 				CONFIG_FILE = zbx_strdup(CONFIG_FILE, zbx_optarg);
+ 				break;
++			case 'f':
++				CONFIG_FOREGROUND = ZBX_RUN_FOREGROUND;
++				break;
+ 			case 'R':
+ 				if (0 == strcmp(zbx_optarg, ZBX_CONFIG_CACHE_RELOAD))
+ 					task = ZBX_TASK_CONFIG_CACHE_RELOAD;
+@@ -577,7 +584,7 @@
+ 	init_ipmi_handler();
+ #endif
+ 
+-	return daemon_start(CONFIG_ALLOW_ROOT);
++	return daemon_start(CONFIG_ALLOW_ROOT, CONFIG_FOREGROUND);
+ }
+ 
+ int	MAIN_ZABBIX_ENTRY()
+diff -uNr zabbix-2.2.5-orig/src/zabbix_server/server.c zabbix-2.2.5/src/zabbix_server/server.c
+--- zabbix-2.2.5-orig/src/zabbix_server/server.c	2014-07-17 22:49:45.000000000 +0900
++++ zabbix-2.2.5/src/zabbix_server/server.c	2014-08-01 11:08:15.772593379 +0900
+@@ -72,6 +72,7 @@
+ const char	*help_message[] = {
+ 	"Options:",
+ 	"  -c --config <file>              Absolute path to the configuration file",
++	"  -f --foreground                 Run in foreground don't fork",
+ 	"  -n --new-nodeid <nodeid>        Convert database data to new nodeid",
+ 	"  -R --runtime-control <option>   Perform administrative functions",
+ 	"",
+@@ -90,6 +91,7 @@
+ static struct zbx_option	longopts[] =
+ {
+ 	{"config",		1,	NULL,	'c'},
++	{"foreground",		0,	NULL,	'f'},
+ 	{"new-nodeid",		1,	NULL,	'n'},
+ 	{"runtime-control",	1,	NULL,	'R'},
+ 	{"help",		0,	NULL,	'h'},
+@@ -98,7 +100,7 @@
+ };
+ 
+ /* short options */
+-static char	shortopts[] = "c:n:hVR:";
++static char	shortopts[] = "c:n:fhVR:";
+ 
+ /* end of COMMAND LINE OPTIONS */
+ 
+@@ -199,6 +201,8 @@
+ char	*CONFIG_LOAD_MODULE_PATH	= NULL;
+ char	**CONFIG_LOAD_MODULE		= NULL;
+ 
++int	CONFIG_FOREGROUND		= ZBX_RUN_BACKGROUND;
++
+ /* mutex for node syncs */
+ ZBX_MUTEX	node_sync_access;
+ 
+@@ -507,6 +511,9 @@
+ 			case 'c':
+ 				CONFIG_FILE = zbx_strdup(CONFIG_FILE, zbx_optarg);
+ 				break;
++			case 'f':
++				CONFIG_FOREGROUND = ZBX_RUN_FOREGROUND;
++				break;
+ 			case 'R':
+ 				if (0 == strcmp(zbx_optarg, ZBX_CONFIG_CACHE_RELOAD))
+ 					task = ZBX_TASK_CONFIG_CACHE_RELOAD;
+@@ -559,7 +566,7 @@
+ 			break;
+ 	}
+ 
+-	return daemon_start(CONFIG_ALLOW_ROOT);
++	return daemon_start(CONFIG_ALLOW_ROOT, CONFIG_FOREGROUND);
+ }
+ 
+ int	MAIN_ZABBIX_ENTRY()
